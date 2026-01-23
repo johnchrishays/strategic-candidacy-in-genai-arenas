@@ -99,11 +99,44 @@ def generate_binomial_matrix_w_clone(bt_probs, to_clone, avg_num_votes, model_na
         index=model_names + [f"{model_names[to_clone]}_clone_{i}" for i in range(num_clones)], 
         columns=model_names + [f"{model_names[to_clone]}_clone_{i}" for i in range(num_clones)])
 
-def compute_yrwr_scores(estimated_abilities, to_clone, num_clones):
+
+def compute_yrwr_scores_for_org(corrected_estimated_abilities, org_models, org_scores, to_clone, num_clones):
+
+    M = len(corrected_estimated_abilities) - num_clones
+    non_cloned_corrections = [] # number of times the YRWR correction is applied to a pair of models where at least one is not a clone
+
+    for i, m in enumerate(org_models):
+        if m == to_clone:
+            # handle clones
+            for j in range(num_clones):
+                corrected_estimated_abilities[M+j] = min(corrected_estimated_abilities[to_clone], np.min(corrected_estimated_abilities[M:M+j+1]))
+        if num_clones > 0 and to_clone in org_models[:i]: # if cloned model is ahead of m, correct m's score to min over clones
+            if org_scores[i] < np.min(org_scores[:i]):
+                model_ahead = org_models[np.argmin(org_scores[:i])]
+                non_cloned_corrections.append((model_ahead, m))
+            if org_scores[i] < np.min(corrected_estimated_abilities[M:M+num_clones]):
+                model_ahead = to_clone
+                non_cloned_corrections.append((model_ahead, m))
+            corrected_estimated_abilities[m] = min(np.min(org_scores[:i+1]), np.min(corrected_estimated_abilities[M:M+num_clones]))
+        else: # if cloned model is behind m, correct m's score to min over original models
+            if i == 0:  
+                continue
+            if org_scores[i] < np.min(org_scores[:i]):
+                model_ahead = org_models[np.argmin(org_scores[:i])]
+                non_cloned_corrections.append((model_ahead, m))
+            corrected_estimated_abilities[m] = min(org_scores[:i+1])
+
+    return non_cloned_corrections
+
+def compute_yrwr_scores(estimated_abilities, to_clone, num_clones, org_to_models):
     corrected_estimated_abilities = np.array(estimated_abilities, copy=True)
-    for i in range(num_clones):
-        corrected_estimated_abilities[M+i] = min(estimated_abilities.iloc[to_clone], np.min(estimated_abilities.iloc[M:M+i+1]))
-    return corrected_estimated_abilities
+    non_cloned_corrections = []
+    for org in org_to_models.keys():
+        org_models = org_to_models[org]
+        org_scores = [corrected_estimated_abilities[m] for m in org_models]
+        non_cloned_corrections_for_org = compute_yrwr_scores_for_org(corrected_estimated_abilities, org_models, org_scores, to_clone, num_clones)
+        non_cloned_corrections.extend(non_cloned_corrections_for_org)
+    return corrected_estimated_abilities, non_cloned_corrections
 
 
 def compute_borda(binom_matrix_df_w_clone):
@@ -113,9 +146,7 @@ def compute_rank(estimated_abilities, idx):
     return np.where(np.argsort(estimated_abilities)[::-1] == idx)[0][0]
 
 def simulate_clone(to_clone, B, num_clones, compute_without_clone=True, use_borda=True, yrwr=False, org_to_models=None, model_to_org=None):
-    avg_votes_mat_w_clone = pd.DataFrame(np.full((M+num_clones, M+num_clones), avg_num_votes), 
-        index=model_names + [f"{model_names[to_clone]}_clone_{i}" for i in range(num_clones)], 
-        columns=model_names + [f"{model_names[to_clone]}_clone_{i}" for i in range(num_clones)])
+
     rank_w_clone = []
     rank_wo_clone = []
     yrwr_rank_w_clone = []
@@ -124,41 +155,49 @@ def simulate_clone(to_clone, B, num_clones, compute_without_clone=True, use_bord
     kt_distance_yrwr = []
     kt_dist_bw_mechanisms = []
     order_violations = []
+    order_violations_no_clones = []
+
+    true_rank = np.concatenate([true_abilities, np.array([true_abilities.iloc[to_clone]] * num_clones)])
+
+    # simulate B times
     for _ in range(B):
+        # generate vote data for each matchup
         binom_matrix_df = generate_binomial_matrix(true_bt_probs, avg_num_votes, model_names)
         binom_matrix_df_w_clone = generate_binomial_matrix_w_clone(true_bt_probs, to_clone, avg_num_votes, model_names, num_clones)
 
         if use_borda:
             estimated_abilities_with_clone = compute_borda(binom_matrix_df_w_clone)
         else:
+            # number of voters per matchup
+            avg_votes_mat_w_clone = pd.DataFrame(np.full((M+num_clones, M+num_clones), avg_num_votes), 
+                index=model_names + [f"{model_names[to_clone]}_clone_{i}" for i in range(num_clones)], 
+                columns=model_names + [f"{model_names[to_clone]}_clone_{i}" for i in range(num_clones)])
             estimated_abilities_with_clone = fit_bt_model(binom_matrix_df_w_clone, avg_votes_mat_w_clone)[0]
-        rank_original_with_clone = compute_rank(estimated_abilities_with_clone, to_clone)
-        rank_clones = [compute_rank(estimated_abilities_with_clone, M+i) for i in range(num_clones)]
-        rank_w_clone.append(min(rank_original_with_clone, min(rank_clones)))
-        if yrwr:
-            rank_tmp = compute_rank(estimated_abilities_with_clone[:M], to_clone)
-            clone_org = model_to_org[model_names[to_clone]]
-            models_ahead = []
-            for m in org_to_models[clone_org]:
-                models_ahead.append(m)
-                if m == to_clone:
-                    break
+        
+        # status quo rank of best of clones
+        rank_of_cloned_model = compute_rank(estimated_abilities_with_clone, to_clone)
+        rank_of_clones = [compute_rank(estimated_abilities_with_clone, M+i) for i in range(num_clones)]
+        rank_w_clone.append(min(rank_of_cloned_model, min(rank_of_clones)))
 
-            models_ahead_ranks = [compute_rank(estimated_abilities_with_clone[:M], m) for m in models_ahead]
-            if rank_tmp < max(models_ahead_ranks):
-                order_violations.append((models_ahead[np.argmax(models_ahead_ranks)], to_clone))
-            yrwr_rank_w_clone.append(max(rank_tmp, max(models_ahead_ranks)))
-        true_rank = np.concatenate([true_abilities, np.array([true_abilities.iloc[to_clone]] * num_clones)])
         kt = kendalltau(estimated_abilities_with_clone, true_rank)[0]
         kt_distance_w_clone.append(kt)
-        yrwr_scores = compute_yrwr_scores(estimated_abilities_with_clone, to_clone, num_clones)
-        kt_yrwr = kendalltau(yrwr_scores, true_rank)[0]
-        kt_distance_yrwr.append(kt_yrwr)
 
-        clone_inds = [to_clone] + [M+i for i in range(num_clones)] 
-        total_distance = kendalltau(estimated_abilities_with_clone, yrwr_scores)[0] * (M + num_clones) * (M + num_clones - 1) / 4
-        clone_distance = kendalltau(estimated_abilities_with_clone[clone_inds], yrwr_scores[clone_inds])[0] * (num_clones + 1) * num_clones / 4
-        kt_dist_bw_mechanisms.append(total_distance - clone_distance)
+
+        if yrwr:
+            # Compute YRWR rank with clone
+            corrected_estimated_abilities, corrections = compute_yrwr_scores(estimated_abilities_with_clone, to_clone, num_clones, org_to_models)
+            rank_of_cloned_model = compute_rank(corrected_estimated_abilities, to_clone)
+            rank_of_clones = [compute_rank(corrected_estimated_abilities, M+i) for i in range(num_clones)]
+            yrwr_rank_w_clone.append(min(rank_of_cloned_model, min(rank_of_clones)))
+            order_violations.extend(corrections)
+
+            kt_yrwr = kendalltau(corrected_estimated_abilities, true_rank)[0]
+            kt_distance_yrwr.append(kt_yrwr)
+
+            clone_inds = [to_clone] + [M+i for i in range(num_clones)] 
+            total_distance = kendalltau(estimated_abilities_with_clone, corrected_estimated_abilities)[0] * (M + num_clones) * (M + num_clones - 1) / 4
+            clone_distance = kendalltau(estimated_abilities_with_clone.iloc[clone_inds], corrected_estimated_abilities[clone_inds])[0] * (num_clones + 1) * num_clones / 4
+            kt_dist_bw_mechanisms.append(total_distance - clone_distance)
         
         if compute_without_clone:
             if use_borda:
@@ -168,7 +207,9 @@ def simulate_clone(to_clone, B, num_clones, compute_without_clone=True, use_bord
             rank_original = compute_rank(estimated_abilities, to_clone)
             rank_wo_clone.append(rank_original)
             if yrwr:
-                yrwr_rank_wo_clone.append(rank_original)
+                corrected_estimated_abilities, corrections = compute_yrwr_scores(estimated_abilities, to_clone, 0, org_to_models)
+                yrwr_rank_wo_clone.append(compute_rank(corrected_estimated_abilities, to_clone))
+                order_violations_no_clones.extend(corrections)
 
     result_dict = {
         "rank_w_clone": np.array(rank_w_clone),
@@ -193,7 +234,7 @@ def init_db(db_path):
 
 def append_df(df, table, db_path):
     with sqlite3.connect(db_path) as conn:
-        df.to_sql(table, conn, if_exists="append", index=False, method="multi")
+        df.to_sql(table, conn, if_exists="append", index=False)
 
 if __name__ == "__main__":
 
@@ -256,7 +297,11 @@ if __name__ == "__main__":
         order_violations = []
         for to_clone in tqdm(range(M)):
             for num_clones in range(1, max_num_clones+1):
-                result_dict = simulate_clone(to_clone, B, num_clones, compute_without_clone=True, yrwr=True, org_to_models=org_to_models, model_to_org=model_to_org)
+                if num_clones == 1:
+                    compute_without_clone = True
+                else:
+                    compute_without_clone = False
+                result_dict = simulate_clone(to_clone, B, num_clones, compute_without_clone=compute_without_clone, yrwr=True, org_to_models=org_to_models, model_to_org=model_to_org)
                 rank_w_clone[:,to_clone,num_clones-1] = result_dict["rank_w_clone"]
                 yrwr_rank_w_clone[:,to_clone,num_clones-1] = result_dict["yrwr_rank_w_clone"]
                 kt_distance_w_clone[:,to_clone,num_clones-1] = result_dict["kt_distance_w_clone"]
