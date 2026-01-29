@@ -243,11 +243,13 @@ if __name__ == "__main__":
     parser.add_argument("--job_id", type=int, required=True, help="The job ID")
     parser.add_argument("--max_num_clones", type=int, default=1, help="The maximum number of clones to simulate")
     parser.add_argument("--keep_existing_results", action="store_true", help="Whether to keep existing results")
+    parser.add_argument("--noisy_producer_rankings", action="store_true", help="Whether producer rankings are noisy")
     args = parser.parse_args()
     B = args.B
     max_num_clones = args.max_num_clones
     keep_existing_results = args.keep_existing_results
-    DB_PATH = f"results/job_{args.job_id}.sqlite"
+    noisy_producer_rankings = args.noisy_producer_rankings
+    DB_PATH = f"results/job_{args.job_id}{'_noisy' if noisy_producer_rankings else ''}.sqlite"
 
     if not keep_existing_results:
         try:
@@ -275,9 +277,14 @@ if __name__ == "__main__":
         model_names = list(true_abilities.index)
         true_bt_probs = win_rate_matrix(true_abilities.values, model_names)
 
+        if noisy_producer_rankings:
+            noise_level = 1e-15
+            noisy_abilities = true_abilities + np.random.normal(0, noise_level, len(true_abilities))
+            df['Noisy Score'] = noisy_abilities 
+
         org_to_models = (
             df.reset_index()
-              .sort_values('Score', ascending=False)
+              .sort_values('Score' if not noisy_producer_rankings else 'Noisy Score', ascending=False)
               .groupby('Organization')['Model']
               .apply(lambda models: [model_names.index(m) for m in models])
               .to_dict()
