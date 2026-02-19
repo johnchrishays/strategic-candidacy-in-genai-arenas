@@ -1,0 +1,7 @@
+*.sqlite
+results*
+plots
+parsed_tables
+parsed_heatmaps
+logs
+__pycache__

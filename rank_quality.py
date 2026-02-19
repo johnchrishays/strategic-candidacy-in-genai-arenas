@@ -111,17 +111,17 @@ def compute_yrwr_scores_for_org(corrected_estimated_abilities, org_models, org_s
             for j in range(num_clones):
                 corrected_estimated_abilities[M+j] = min(corrected_estimated_abilities[to_clone], np.min(corrected_estimated_abilities[M:M+j+1]))
         if num_clones > 0 and to_clone in org_models[:i]: # if cloned model is ahead of m, correct m's score to min over clones
-            if org_scores[i] < np.min(org_scores[:i]):
+            if org_scores[i] > np.min(org_scores[:i]):
                 model_ahead = org_models[np.argmin(org_scores[:i])]
                 non_cloned_corrections.append((model_ahead, m))
-            if org_scores[i] < np.min(corrected_estimated_abilities[M:M+num_clones]):
+            if org_scores[i] > np.min(corrected_estimated_abilities[M:M+num_clones]):
                 model_ahead = to_clone
                 non_cloned_corrections.append((model_ahead, m))
             corrected_estimated_abilities[m] = min(np.min(org_scores[:i+1]), np.min(corrected_estimated_abilities[M:M+num_clones]))
         else: # if cloned model is behind m, correct m's score to min over original models
             if i == 0:  
                 continue
-            if org_scores[i] < np.min(org_scores[:i]):
+            if org_scores[i] > np.min(org_scores[:i]):
                 model_ahead = org_models[np.argmin(org_scores[:i])]
                 non_cloned_corrections.append((model_ahead, m))
             corrected_estimated_abilities[m] = min(org_scores[:i+1])
@@ -145,7 +145,7 @@ def compute_borda(binom_matrix_df_w_clone):
 def compute_rank(estimated_abilities, idx):
     return np.where(np.argsort(estimated_abilities)[::-1] == idx)[0][0]
 
-def simulate_clone(to_clone, B, num_clones, compute_without_clone=True, use_borda=True, yrwr=False, org_to_models=None, model_to_org=None):
+def simulate_clone(to_clone, B, num_clones, compute_without_clone=True, use_borda=True, yrwr=False, org_to_models=None):
 
     rank_w_clone = []
     rank_wo_clone = []
@@ -244,12 +244,14 @@ if __name__ == "__main__":
     parser.add_argument("--max_num_clones", type=int, default=1, help="The maximum number of clones to simulate")
     parser.add_argument("--keep_existing_results", action="store_true", help="Whether to keep existing results")
     parser.add_argument("--noisy_producer_rankings", action="store_true", help="Whether producer rankings are noisy")
+    parser.add_argument("--noise_level", type=float, default=0, help="How much noise to add")
     args = parser.parse_args()
     B = args.B
     max_num_clones = args.max_num_clones
     keep_existing_results = args.keep_existing_results
     noisy_producer_rankings = args.noisy_producer_rankings
-    DB_PATH = f"results/job_{args.job_id}{'_noisy' if noisy_producer_rankings else ''}.sqlite"
+    noise_level = args.noise_level
+    DB_PATH = f"results/job_{args.job_id}{f'_noisy_{noise_level}' if noisy_producer_rankings else ''}.sqlite"
 
     if not keep_existing_results:
         try:
@@ -278,9 +280,9 @@ if __name__ == "__main__":
         true_bt_probs = win_rate_matrix(true_abilities.values, model_names)
 
         if noisy_producer_rankings:
-            noise_level = 1e-15
             noisy_abilities = true_abilities + np.random.normal(0, noise_level, len(true_abilities))
             df['Noisy Score'] = noisy_abilities 
+            kt_noisy = kendalltau(df['Noisy Score'], df["Score"])[0]
 
         org_to_models = (
             df.reset_index()
@@ -289,9 +291,8 @@ if __name__ == "__main__":
               .apply(lambda models: [model_names.index(m) for m in models])
               .to_dict()
         )
-        model_to_org = df.reset_index().set_index("Model")["Organization"].to_dict()
 
-        avg_num_votes = df['Votes'].values.sum() / (M * (M-1) / 2)
+        avg_num_votes = int(df['Votes'].values.sum() / (M * (M-1) / 2))
         avg_votes_mat = pd.DataFrame(np.full((M, M), avg_num_votes), index=model_names, columns=model_names)
 
         rank_w_clone = np.nan * np.zeros((B, M, max_num_clones))
@@ -304,11 +305,11 @@ if __name__ == "__main__":
         order_violations = []
         for to_clone in tqdm(range(M)):
             for num_clones in range(1, max_num_clones+1):
-                if num_clones == 1:
+                if num_clones == 1: # only compute simulation with zero clones once
                     compute_without_clone = True
                 else:
                     compute_without_clone = False
-                result_dict = simulate_clone(to_clone, B, num_clones, compute_without_clone=compute_without_clone, yrwr=True, org_to_models=org_to_models, model_to_org=model_to_org)
+                result_dict = simulate_clone(to_clone, B, num_clones, compute_without_clone=compute_without_clone, yrwr=True, org_to_models=org_to_models)
                 rank_w_clone[:,to_clone,num_clones-1] = result_dict["rank_w_clone"]
                 yrwr_rank_w_clone[:,to_clone,num_clones-1] = result_dict["yrwr_rank_w_clone"]
                 kt_distance_w_clone[:,to_clone,num_clones-1] = result_dict["kt_distance_w_clone"]
@@ -319,34 +320,27 @@ if __name__ == "__main__":
                     rank_wo_clone[:,to_clone] = result_dict["rank_wo_clone"]
                     yrwr_rank_wo_clone[:,to_clone] = result_dict["yrwr_rank_wo_clone"]
 
-        TABLE_WITH_CLONE = f"{type_no_dashes}_with_clone"
-        TABLE_WITHOUT_CLONE = f"{type_no_dashes}_without_clone"
-        TABLE_YRWR_WITH_CLONE = f"{type_no_dashes}_yrwr_with_clone"
-        TABLE_YRWR_WITHOUT_CLONE = f"{type_no_dashes}_yrwr_without_clone"
-        TABLE_KT_DISTANCE_WITH_CLONE = f"{type_no_dashes}_kt_distance_with_clone"
-        TABLE_KT_DISTANCE_YRWR_WITH_CLONE = f"{type_no_dashes}_kt_distance_yrwr_with_clone"
-        TABLE_KT_DISTANCE_BW_MECHANISMS = f"{type_no_dashes}_kt_distance_bw_mechanisms"
-        TABLE_ORDER_VIOLATIONS = f"{type_no_dashes}_order_violations"
-
         df_wo_clone = pd.DataFrame(rank_wo_clone, columns=model_names)
-        append_df(df_wo_clone, TABLE_WITHOUT_CLONE, DB_PATH)
+        append_df(df_wo_clone, f"{type_no_dashes}_without_clone", DB_PATH)
         df_yrwr_wo_clone = pd.DataFrame(yrwr_rank_wo_clone, columns=model_names)
-        append_df(df_yrwr_wo_clone, TABLE_YRWR_WITHOUT_CLONE, DB_PATH)
+        append_df(df_yrwr_wo_clone, f"{type_no_dashes}_yrwr_without_clone", DB_PATH)
         df_order_violations = pd.DataFrame(order_violations, columns=["model_ahead", "model_to_clone"])
-        append_df(df_order_violations, TABLE_ORDER_VIOLATIONS, DB_PATH)
+        append_df(df_order_violations, f"{type_no_dashes}_order_violations", DB_PATH)
         for num_clones in range(1, max_num_clones+1):
             df_w_clone = pd.DataFrame(rank_w_clone[:,:,num_clones-1], columns=model_names)
             df_w_clone["num_clones"] = num_clones
-            append_df(df_w_clone, TABLE_WITH_CLONE, DB_PATH)
+            append_df(df_w_clone, f"{type_no_dashes}_with_clone", DB_PATH)
             df_yrwr_w_clone = pd.DataFrame(yrwr_rank_w_clone[:,:,num_clones-1], columns=model_names)
             df_yrwr_w_clone["num_clones"] = num_clones
-            append_df(df_yrwr_w_clone, TABLE_YRWR_WITH_CLONE, DB_PATH)
+            append_df(df_yrwr_w_clone, f"{type_no_dashes}_yrwr_with_clone", DB_PATH)
             df_kt_distance_w_clone = pd.DataFrame(kt_distance_w_clone[:,:,num_clones-1], columns=model_names)
             df_kt_distance_w_clone["num_clones"] = num_clones
-            append_df(df_kt_distance_w_clone, TABLE_KT_DISTANCE_WITH_CLONE, DB_PATH)
+            append_df(df_kt_distance_w_clone, f"{type_no_dashes}_kt_distance_with_clone", DB_PATH)
             df_kt_distance_yrwr = pd.DataFrame(kt_distance_yrwr[:,:,num_clones-1], columns=model_names)
             df_kt_distance_yrwr["num_clones"] = num_clones
-            append_df(df_kt_distance_yrwr, TABLE_KT_DISTANCE_YRWR_WITH_CLONE, DB_PATH)
+            df_kt_distance_yrwr["kt_noise"] = kt_noisy
+            append_df(df_kt_distance_yrwr, f"{type_no_dashes}_kt_distance_yrwr_with_clone", DB_PATH)
             df_kt_dist_bw_mechanisms = pd.DataFrame(kt_dist_bw_mechanisms[:,:,num_clones-1], columns=model_names)
             df_kt_dist_bw_mechanisms["num_clones"] = num_clones
-            append_df(df_kt_dist_bw_mechanisms, TABLE_KT_DISTANCE_BW_MECHANISMS, DB_PATH)
+            append_df(df_kt_dist_bw_mechanisms, f"{type_no_dashes}_kt_distance_bw_mechanisms", DB_PATH)
+        
